@@ -1,0 +1,133 @@
+name: Playwright Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    environment: TESTDINO_TOKEN
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        id: playwright-cache
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-v1
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest pytest-playwright pytest-xdist pytest-timeout pytest-html pytest-rerunfailures
+          pip install pytest-playwright-json
+          pip install testdino
+
+      - name: Install Playwright browsers
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        run: playwright install chromium firefox webkit --with-deps
+
+      - name: Install Playwright deps (cached)
+        if: steps.playwright-cache.outputs.cache-hit == 'true'
+        run: playwright install-deps
+
+      # Step 1: Run ALL tests
+      - name: Run all tests
+        run: |
+          pytest tests/ \
+            --playwright-json=test-results/report.json \
+            --html=test-results/index.html \
+            --self-contained-html \
+            -n=10 \
+            --timeout=30 \
+            -v || true
+
+      # Step 2: Cache test metadata
+      - name: Cache test metadata
+        if: always()
+        run: |
+          testdino cache --working-dir test-results --token="${{ secrets.TESTDINO_TOKEN }}" -v
+
+      # Step 3: Log failed test count
+      - name: Log failed test count
+        if: always()
+        run: |
+          if [ -f test-results/report.json ]; then
+            FAILED_COUNT=$(python -c "import json; data = json.load(open('test-results/report.json')); print(data.get('stats', {}).get('unexpected', 0))")
+            echo "::notice::Failed test count: $FAILED_COUNT"
+            echo "Failed test count: $FAILED_COUNT"
+          else
+            echo "::warning::test-results/report.json not found"
+          fi
+
+      # Step 4: Upload report to TestDino
+      - name: Upload to TestDino
+        if: always()
+        env:
+          TESTDINO_TOKEN: ${{ secrets.TESTDINO_TOKEN }}
+        run: |
+          if [ -n "$TESTDINO_TOKEN" ]; then
+            testdino upload test-results \
+              --json-report test-results/report.json \
+              -v
+          else
+            echo "Skipping upload - TESTDINO_TOKEN not set"
+          fi
+
+      # Step 5: Get last failed and rerun only those
+      - name: Get last failed tests
+        if: always()
+        id: last_failed
+        run: |
+          FAILED_TESTS=$(testdino last-failed --token="${{ secrets.TESTDINO_TOKEN }}" 2>/dev/null) || true
+          echo "Filter: $FAILED_TESTS"
+          echo "args=$FAILED_TESTS" >> $GITHUB_OUTPUT
+
+      - name: Rerun failed tests only
+        if: always()
+        run: |
+            echo "Rerunning failed tests with: ${{ steps.last_failed.outputs.args }}"
+            pytest tests/ \
+              ${{ steps.last_failed.outputs.args }} \
+              --playwright-json=test-results/rerun-report.json \
+              --html=test-results/rerun-index.html \
+              --self-contained-html \
+              -n=10 \
+              --timeout=30 \
+              -v || true
+
+      - name: Cache rerun metadata
+        if: always()
+        run: |
+          testdino cache --working-dir test-results --token="${{ secrets.TESTDINO_TOKEN }}" -v
+
+      - name: Upload rerun report to TestDino
+        if: always()
+        env:
+          TESTDINO_TOKEN: ${{ secrets.TESTDINO_TOKEN }}
+        run: |
+          if [ -n "$TESTDINO_TOKEN" ] && [ -f test-results/rerun-report.json ]; then
+            testdino upload test-results \
+              --json-report test-results/rerun-report.json \
+              -v
+          fi
+
+      - name: Upload test artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: test-results/
+          retention-days: 30
