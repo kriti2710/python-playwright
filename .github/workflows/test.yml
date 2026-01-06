@@ -59,12 +59,14 @@ jobs:
           pytest tests/ \
             --splits 3 \
             --group ${{ matrix.shard }} \
-            --playwright-json=test-results/report.json \
+            --json-report \
+            --json-report-file=test-results/report.json \
             --html=test-results/index.html \
             --self-contained-html \
             -n=10 \
             --timeout=30 \
             -v || true
+
 
       # ✅ Cache metadata safely
       - name: Cache test metadata
